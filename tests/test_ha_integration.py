@@ -177,3 +177,24 @@ async def test_options_flow(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["update_interval"] == 60
     assert entry.state is ConfigEntryState.LOADED
+
+
+async def test_diagnostics_are_anonymous(hass: HomeAssistant) -> None:
+    from custom_components.smartthings_find.diagnostics import (
+        async_get_config_entry_diagnostics,
+    )
+
+    entry = MockConfigEntry(domain=DOMAIN, unique_id="user-9", data={CONF_JSESSIONID: "SECRET"})
+    entry.add_to_hass(hass)
+    with _patch_client():
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        entry.runtime_data.client.device_list_summary = {"lists": {"deviceList": 2}}
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diag["entry"]["has_session"] is True
+    assert [d["model_id"] for d in diag["devices"]] == ["EI-T5300", "EI-T5600"]
+    assert diag["devices"][0]["has_location"] is True
+    text = str(diag)
+    for secret in ("SECRET", "tag1", "tag2", "user-9", "Llaves", "Mochila", "43.263", "-2.935"):
+        assert secret not in text

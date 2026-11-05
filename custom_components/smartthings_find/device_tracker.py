@@ -66,6 +66,8 @@ class SmartThingsFindTracker(SmartThingsFindEntity, TrackerEntity):
             "device_type": self.device.type_code,
             "model_id": self.device.model_id,
         }
+        if self.device.owner:
+            attrs["owner"] = self.device.owner
         if state and state.location:
             attrs["last_seen"] = state.location.timestamp.isoformat()
             attrs["location_source"] = state.location.operation

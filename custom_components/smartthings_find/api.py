@@ -137,6 +137,9 @@ class StfDevice:
     model_id: str | None
     type_code: str | None
     icon_url: str | None = None
+    sub_type: str | None = None
+    # Nombre del miembro (familia/cuenta vinculada) al que pertenece, si no es tuyo.
+    owner: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -145,20 +148,87 @@ class StfDevice:
         return self.type_code == "TAG"
 
     @classmethod
-    def from_api(cls, data: dict[str, Any]) -> StfDevice:
-        """Crea el dispositivo a partir de un elemento de ``deviceList``."""
+    def from_api(cls, data: dict[str, Any], owner: str | None = None) -> StfDevice:
+        """Crea el dispositivo a partir de un elemento de ``deviceList``.
+
+        La web actual usa ``deviceType``; versiones anteriores usaban
+        ``deviceTypeCode``. Se aceptan ambas variantes de cada campo.
+        """
+        device_id = data.get("dvceID") or data.get("dvceId")
+        if not device_id:
+            raise KeyError("dvceID")
         # El nombre viene doblemente escapado: "Sergio&amp;#39;s tag".
-        name = html.unescape(html.unescape(str(data.get("modelName") or "")))
+        name = html.unescape(
+            html.unescape(str(data.get("modelName") or data.get("displayName") or ""))
+        )
         icons = data.get("icons") or {}
+        type_code = data.get("deviceType") or data.get("deviceTypeCode")
         return cls(
-            device_id=str(data["dvceID"]),
+            device_id=str(device_id),
             user_id=str(data.get("usrId") or ""),
-            name=name or str(data["dvceID"]),
+            name=name or str(device_id),
             model_id=data.get("modelID"),
-            type_code=data.get("deviceTypeCode"),
+            type_code=str(type_code).upper() if type_code else None,
             icon_url=safe_icon_url(icons.get("coloredIcon")) if isinstance(icons, dict) else None,
+            sub_type=data.get("subType"),
+            owner=owner,
             raw=data,
         )
+
+
+def parse_device_list(data: dict[str, Any]) -> tuple[list[StfDevice], dict[str, Any]]:
+    """Extrae los dispositivos de ``getDeviceList.do``.
+
+    La respuesta contiene ``deviceList`` (dispositivos propios) y
+    ``childrenDeviceList``: grupos ``{userName, deviceList}`` con los
+    dispositivos de otros miembros (familia / cuentas vinculadas).
+
+    Devuelve también un resumen ANÓNIMO (sin ids, nombres ni posiciones) de la
+    estructura recibida, útil para diagnosticar dispositivos que no aparecen.
+    """
+    devices: list[StfDevice] = []
+    seen: set[str] = set()
+    summary: dict[str, Any] = {
+        "top_level_keys": sorted(data),
+        "lists": {},
+        "devices": [],
+        "skipped": 0,
+    }
+
+    def add(raw_list: Any, source: str, owner: str | None) -> None:
+        if not isinstance(raw_list, list):
+            return
+        summary["lists"][source] = len(raw_list)
+        for raw in raw_list:
+            if not isinstance(raw, dict):
+                summary["skipped"] += 1
+                continue
+            try:
+                dev = StfDevice.from_api(raw, owner=owner)
+            except KeyError:
+                summary["skipped"] += 1
+                continue
+            summary["devices"].append(
+                {
+                    "source": source,
+                    "device_type": dev.type_code,
+                    "sub_type": dev.sub_type,
+                    "model_id": dev.model_id,
+                    "fields": sorted(raw),
+                    "duplicate": dev.device_id in seen,
+                }
+            )
+            if dev.device_id in seen:
+                continue
+            seen.add(dev.device_id)
+            devices.append(dev)
+
+    add(data.get("deviceList"), "deviceList", None)
+    for idx, group in enumerate(data.get("childrenDeviceList") or []):
+        if isinstance(group, dict):
+            owner = html.unescape(str(group.get("userName") or "")) or None
+            add(group.get("deviceList"), f"childrenDeviceList[{idx}]", owner)
+    return devices, summary
 
 
 @dataclass(slots=True)
@@ -600,6 +670,8 @@ class SmartThingsFindClient:
     def __init__(self, session: aiohttp.ClientSession, jsessionid: str) -> None:
         self._session = session
         self._csrf: str | None = None
+        # Resumen anónimo de la última lista de dispositivos (diagnóstico).
+        self.device_list_summary: dict[str, Any] | None = None
         session.cookie_jar.update_cookies({"JSESSIONID": jsessionid}, STF_URL)
 
     @property
@@ -680,14 +752,17 @@ class SmartThingsFindClient:
     async def async_get_devices(self) -> list[StfDevice]:
         """Lista todos los dispositivos de la cuenta."""
         data = await self._post(URL_DEVICE_LIST, data={})
-        if not isinstance(data, dict) or "deviceList" not in data:
+        if not isinstance(data, dict) or (
+            "deviceList" not in data and "childrenDeviceList" not in data
+        ):
             raise SmartThingsFindError("Respuesta inesperada de getDeviceList")
-        devices = []
-        for raw in data["deviceList"] or []:
-            try:
-                devices.append(StfDevice.from_api(raw))
-            except KeyError:
-                _LOGGER.debug("Dispositivo sin dvceID ignorado")
+        devices, summary = parse_device_list(data)
+        self.device_list_summary = summary
+        _LOGGER.debug(
+            "getDeviceList: listas=%s, tipos=%s",
+            summary["lists"],
+            [(d["device_type"], d["model_id"], d["source"]) for d in summary["devices"]],
+        )
         return devices
 
     async def async_request_location(self, device: StfDevice) -> None:

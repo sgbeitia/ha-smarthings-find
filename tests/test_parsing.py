@@ -8,6 +8,7 @@ from stf_api import (
     calc_accuracy,
     extract_battery,
     extract_location,
+    parse_device_list,
     parse_device_state,
     parse_stf_date,
     safe_icon_url,
@@ -143,3 +144,64 @@ def test_icon_url_only_from_samsung_https():
 def test_qr_regex_rejects_markdown_injection():
     page = "x='https://signin.samsung.com/key/AbC-12_3)](https://evil.example)'"
     assert stf_api._QR_URL_RE.search(page).group(0) == "https://signin.samsung.com/key/AbC-12_3"
+
+
+def test_device_list_includes_other_members_and_new_fields():
+    data = {
+        "deviceList": [
+            # Formato antiguo (SmartTag+)
+            {
+                "dvceID": "t1",
+                "usrId": "me",
+                "modelName": "Llaves",
+                "modelID": "EI-T7300",
+                "deviceTypeCode": "TAG",
+            },
+            # Formato actual de la web: deviceType en lugar de deviceTypeCode
+            {
+                "dvceID": "t2",
+                "usrId": "me",
+                "modelName": "Mochila",
+                "modelID": "EI-T5600",
+                "deviceType": "TAG",
+                "subType": "TAG2",
+            },
+        ],
+        "childrenDeviceList": [
+            {
+                "userName": "Ana",
+                "deviceList": [
+                    {
+                        "dvceId": "t3",
+                        "usrId": "ana",
+                        "modelName": "Bici",
+                        "modelID": "EI-T5600",
+                        "deviceType": "TAG",
+                    },
+                    # Duplicado de un dispositivo propio: no debe repetirse
+                    {"dvceID": "t2", "usrId": "me", "modelName": "Mochila", "deviceType": "TAG"},
+                    {"usrId": "x"},  # sin id: se ignora
+                ],
+            }
+        ],
+    }
+    devices, summary = parse_device_list(data)
+    assert [d.device_id for d in devices] == ["t1", "t2", "t3"]
+    assert all(d.is_tag for d in devices)
+    assert devices[1].sub_type == "TAG2"
+    assert devices[2].owner == "Ana" and devices[0].owner is None
+    assert summary["lists"] == {"deviceList": 2, "childrenDeviceList[0]": 3}
+    assert summary["skipped"] == 1
+    assert summary["devices"][3]["duplicate"] is True
+
+    # El resumen es anónimo: ni ids, ni nombres, ni usuarios.
+    text = str(summary)
+    for secret in ("t1", "t2", "t3", "Llaves", "Mochila", "Bici", "Ana", "me", "ana"):
+        assert f"'{secret}'" not in text
+
+
+def test_device_list_only_children():
+    devices, _ = parse_device_list(
+        {"childrenDeviceList": [{"userName": "Ana", "deviceList": [{"dvceID": "z"}]}]}
+    )
+    assert [d.device_id for d in devices] == ["z"]

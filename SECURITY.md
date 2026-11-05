@@ -55,8 +55,10 @@ Recomendaciones:
   cookie en los servidores de Samsung**. Cierra la sesión en
   https://smartthingsfind.samsung.com/ y/o cambia la contraseña de tu cuenta
   Samsung, y revisa en la cuenta los dispositivos con sesión iniciada.
-- Esta integración **no** implementa "Descargar diagnósticos", así que esa
-  función no puede filtrar la cookie ni las posiciones.
+- "Descargar diagnósticos" sólo exporta datos **anónimos**: tipo y modelo de
+  cada dispositivo, de qué lista viene y qué campos trae. **No** incluye la
+  cookie, identificadores, nombres, usuarios ni posiciones (hay tests que lo
+  comprueban). Aun así, revisa el fichero antes de compartirlo.
 
 ### c) Quien tenga acceso a tu Home Assistant
 - **Todos los usuarios** de Home Assistant, no sólo los administradores, ven

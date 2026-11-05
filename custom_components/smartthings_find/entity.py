@@ -24,7 +24,8 @@ class SmartThingsFindEntity(CoordinatorEntity[SmartThingsFindCoordinator]):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device.device_id)},
             manufacturer="Samsung",
-            name=device.name,
+            # Los dispositivos de otros miembros llevan su nombre para distinguirlos.
+            name=f"{device.name} ({device.owner})" if device.owner else device.name,
             model=device.model_id,
             configuration_url=CONFIGURATION_URL,
         )
