@@ -1,0 +1,13 @@
+{
+  "domain": "smartthings_find",
+  "name": "SmartThings Find",
+  "codeowners": ["@sgbeitia"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/sgbeitia/ha-smarthings-find",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/sgbeitia/ha-smarthings-find/issues",
+  "requirements": ["segno>=1.6.0"],
+  "version": "0.1.0"
+}

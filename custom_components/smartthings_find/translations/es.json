@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SmartThings Find",
+        "description": "Se mostrará un código QR de Samsung Account. Escanéalo con la cámara de un móvil donde tengas iniciada sesión con tu cuenta Samsung (o abre el enlace en él) y aprueba el inicio de sesión.\n\nPulsa **Enviar** para generar el código."
+      },
+      "reauth_confirm": {
+        "title": "Sesión caducada",
+        "description": "La sesión de SmartThings Find ya no es válida. Pulsa **Enviar** para volver a iniciar sesión con un código QR."
+      },
+      "login_failed": {
+        "title": "No se completó el inicio de sesión",
+        "description": "Pulsa **Enviar** para generar un código QR nuevo."
+      }
+    },
+    "progress": {
+      "scan_qr": "Escanea este código con tu móvil y aprueba el inicio de sesión en Samsung Account (caduca en 3 minutos):\n\n![Código QR]({qr_image})\n\nSi estás en el propio móvil, abre este enlace: [{qr_url}]({qr_url})"
+    },
+    "error": {
+      "timeout": "El código QR caducó antes de escanearse.",
+      "login_failed": "Samsung rechazó o no completó el inicio de sesión. Revisa los registros para más detalles."
+    },
+    "abort": {
+      "already_configured": "Esta cuenta ya está configurada.",
+      "cannot_connect": "No se pudo conectar con Samsung Account.",
+      "reauth_successful": "Sesión renovada correctamente.",
+      "wrong_account": "Has iniciado sesión con una cuenta Samsung distinta a la configurada."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opciones de SmartThings Find",
+        "data": {
+          "update_interval": "Intervalo de actualización",
+          "active_mode_tags": "Modo activo para SmartTags",
+          "active_mode_others": "Modo activo para otros dispositivos (móviles, relojes, auriculares…)"
+        },
+        "data_description": {
+          "update_interval": "Cada cuántos segundos se consulta SmartThings Find.",
+          "active_mode_tags": "Pide a la red una posición nueva en cada consulta en lugar de leer sólo la última conocida.",
+          "active_mode_others": "Igual, pero para teléfonos/tablets/relojes. Consume batería y puede encender la pantalla."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_seen": { "name": "Última posición" }
+    },
+    "button": {
+      "ring": { "name": "Hacer sonar" }
+    }
+  }
+}

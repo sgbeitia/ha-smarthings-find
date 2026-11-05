@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SmartThings Find",
+        "description": "A Samsung Account QR code will be shown. Scan it with a phone that is signed in to your Samsung account (or open the link on it) and approve the sign-in.\n\nPress **Submit** to generate the code."
+      },
+      "reauth_confirm": {
+        "title": "Session expired",
+        "description": "The SmartThings Find session is no longer valid. Press **Submit** to sign in again with a QR code."
+      },
+      "login_failed": {
+        "title": "Sign-in not completed",
+        "description": "Press **Submit** to generate a new QR code."
+      }
+    },
+    "progress": {
+      "scan_qr": "Scan this code with your phone and approve the Samsung Account sign-in (expires in 3 minutes):\n\n![QR code]({qr_image})\n\nIf you are on that phone, open this link: [{qr_url}]({qr_url})"
+    },
+    "error": {
+      "timeout": "The QR code expired before it was scanned.",
+      "login_failed": "Samsung rejected or did not complete the sign-in. Check the logs for details."
+    },
+    "abort": {
+      "already_configured": "This account is already configured.",
+      "cannot_connect": "Could not connect to Samsung Account.",
+      "reauth_successful": "Session renewed successfully.",
+      "wrong_account": "You signed in with a different Samsung account than the configured one."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SmartThings Find options",
+        "data": {
+          "update_interval": "Update interval",
+          "active_mode_tags": "Active mode for SmartTags",
+          "active_mode_others": "Active mode for other devices (phones, watches, earbuds…)"
+        },
+        "data_description": {
+          "update_interval": "How often (seconds) SmartThings Find is polled.",
+          "active_mode_tags": "Ask the network for a fresh location on every poll instead of only reading the last known one.",
+          "active_mode_others": "Same, for phones/tablets/watches. Uses battery and may wake the screen."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_seen": { "name": "Last seen" }
+    },
+    "button": {
+      "ring": { "name": "Ring" }
+    }
+  }
+}
