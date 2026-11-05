@@ -59,7 +59,9 @@ URL_DEVICE_LIST = STF_BASE + "/device/getDeviceList.do"
 URL_ADD_OPERATION = STF_BASE + "/dm/addOperation.do"
 URL_SET_LAST_SELECT = STF_BASE + "/device/setLastSelect.do"
 
-_QR_URL_RE = re.compile(r"https://signin\.samsung\.com/key/[^'\"\s<>]+")
+# Sólo aceptamos un identificador alfanumérico: la URL se muestra luego como
+# enlace Markdown en el config flow y no debe poder inyectar nada.
+_QR_URL_RE = re.compile(r"https://signin\.samsung\.com/key/[A-Za-z0-9_-]+")
 _REDIRECT_RE = re.compile(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]")
 
 # Tipos de operación que contienen coordenadas.
@@ -74,6 +76,43 @@ BATTERY_LEVELS: dict[str, int] = {
 }
 
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+
+# Dominios desde los que aceptamos iconos (el navegador del usuario de HA los
+# descarga directamente; un dominio arbitrario sería un "píxel espía").
+_ICON_DOMAINS = ("samsung.com", "samsungcloud.com", "samsungosp.com")
+
+
+def _require_origin(url: URL, origin: URL) -> URL:
+    """Comprueba que ``url`` tiene exactamente el mismo origen que ``origin``.
+
+    Durante el login seguimos dos URLs que vienen dentro de las respuestas de
+    Samsung. Sólo se aceptan si apuntan a account.samsung.com y
+    smartthingsfind.samsung.com por https; cualquier otro destino se rechaza
+    para que nunca se envíe el código de autorización a un tercero.
+    """
+    if (url.scheme, url.host, url.port) != (origin.scheme, origin.host, origin.port):
+        raise SmartThingsFindError(f"Destino inesperado durante el login: {url.host!r}")
+    return url
+
+
+def safe_icon_url(value: Any) -> str | None:
+    """Devuelve la URL del icono sólo si es https y de un dominio de Samsung."""
+    if not isinstance(value, str):
+        return None
+    try:
+        url = URL(value)
+    except ValueError:
+        return None
+    host = (url.host or "").lower()
+    if url.scheme != "https" or not any(host == d or host.endswith("." + d) for d in _ICON_DOMAINS):
+        return None
+    return str(url)
+
+
+def _net_error(err: Exception) -> str:
+    """Describe un error de red sin incluir la URL (lleva el token CSRF)."""
+    return type(err).__name__
 
 
 class SmartThingsFindError(Exception):
@@ -122,7 +161,7 @@ class StfDevice:
             name=name or str(data["dvceID"]),
             model_id=data.get("modelID"),
             type_code=data.get("deviceTypeCode"),
-            icon_url=icons.get("coloredIcon") if isinstance(icons, dict) else None,
+            icon_url=safe_icon_url(icons.get("coloredIcon")) if isinstance(icons, dict) else None,
             raw=data,
         )
 
@@ -313,7 +352,9 @@ class QrLogin:
                 if res.status != 200:
                     raise SmartThingsFindError(f"signInWithQrCode devolvió HTTP {res.status}")
         except aiohttp.ClientError as err:
-            raise SmartThingsFindError(f"Error de red al iniciar el login: {err}") from err
+            raise SmartThingsFindError(
+                f"Error de red al iniciar el login: {_net_error(err)}"
+            ) from err
 
         match = _QR_URL_RE.search(text)
         if not match:
@@ -355,20 +396,22 @@ class QrLogin:
                 raise SmartThingsFindLoginTimeout("El código QR no se escaneó a tiempo")
 
             # signInComplete -> HTML con un redirect JS hacia STF login.do?code=...
-            async with s.get(str(URL(ACCOUNT_BASE).join(URL(next_url))), timeout=_TIMEOUT) as res:
+            account = URL(ACCOUNT_BASE)
+            complete_url = _require_origin(account.join(URL(next_url)), account)
+            async with s.get(complete_url, timeout=_TIMEOUT) as res:
                 text = await res.text()
                 if res.status != 200:
                     raise SmartThingsFindError(f"signInComplete devolvió HTTP {res.status}")
             match = _REDIRECT_RE.search(text)
             if not match:
                 raise SmartThingsFindError("No se encontró la redirección final del login")
-            redirect = html.unescape(match.group(1))
+            redirect = _require_origin(URL(html.unescape(match.group(1))), STF_URL)
 
             async with s.get(redirect, timeout=_TIMEOUT) as res:
                 if res.status != 200:
                     raise SmartThingsFindError(f"login.do devolvió HTTP {res.status}")
         except aiohttp.ClientError as err:
-            raise SmartThingsFindError(f"Error de red durante el login: {err}") from err
+            raise SmartThingsFindError(f"Error de red durante el login: {_net_error(err)}") from err
 
         cookie = s.cookie_jar.filter_cookies(STF_URL).get("JSESSIONID")
         if not cookie or not cookie.value:
@@ -403,9 +446,10 @@ class SmartThingsFindClient:
                 body = await res.text()
                 status = res.status
         except aiohttp.ClientError as err:
-            raise SmartThingsFindError(f"Error de red en chkLogin: {err}") from err
+            raise SmartThingsFindError(f"Error de red en chkLogin: {_net_error(err)}") from err
         if status in (401, 403) or (status == 200 and not csrf):
-            raise SmartThingsFindAuthError(f"Sesión no válida (HTTP {status}): {body[:120]!r}")
+            _LOGGER.debug("chkLogin sin sesión (HTTP %s, %d bytes)", status, len(body))
+            raise SmartThingsFindAuthError(f"Sesión no válida (HTTP {status})")
         if status != 200:
             raise SmartThingsFindError(f"chkLogin devolvió HTTP {status}")
         self._csrf = csrf
@@ -428,7 +472,9 @@ class SmartThingsFindClient:
                     status = res.status
                     ctype = res.content_type
             except aiohttp.ClientError as err:
-                raise SmartThingsFindError(f"Error de red en {url}: {err}") from err
+                raise SmartThingsFindError(
+                    f"Error de red en {URL(url).path}: {_net_error(err)}"
+                ) from err
 
             auth_problem = status in (401, 403, 404) or text.strip() == "Logout"
             if auth_problem:
@@ -438,7 +484,8 @@ class SmartThingsFindClient:
                     continue
                 raise SmartThingsFindAuthError(f"Sesión caducada (HTTP {status})")
             if status != 200:
-                raise SmartThingsFindError(f"{url} devolvió HTTP {status}: {text[:200]}")
+                # No incluimos el cuerpo: podría contener datos de ubicación.
+                raise SmartThingsFindError(f"{URL(url).path} devolvió HTTP {status}")
             if not text:
                 return None
             if "json" not in ctype and not text.lstrip().startswith(("{", "[")):
@@ -446,7 +493,7 @@ class SmartThingsFindClient:
             try:
                 return jsonlib.loads(text)
             except ValueError as err:
-                raise SmartThingsFindError(f"Respuesta no JSON de {url}") from err
+                raise SmartThingsFindError(f"Respuesta no JSON de {URL(url).path}") from err
         raise SmartThingsFindAuthError("Sesión caducada")  # pragma: no cover
 
     async def async_get_devices(self) -> list[StfDevice]:
@@ -459,7 +506,7 @@ class SmartThingsFindClient:
             try:
                 devices.append(StfDevice.from_api(raw))
             except KeyError:
-                _LOGGER.debug("Dispositivo sin dvceID ignorado: %s", raw)
+                _LOGGER.debug("Dispositivo sin dvceID ignorado")
         return devices
 
     async def async_request_location(self, device: StfDevice) -> None:

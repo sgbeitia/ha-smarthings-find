@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 
+import stf_api
 from stf_api import (
     StfDevice,
     calc_accuracy,
@@ -9,6 +10,7 @@ from stf_api import (
     extract_location,
     parse_device_state,
     parse_stf_date,
+    safe_icon_url,
 )
 
 
@@ -32,12 +34,12 @@ def test_device_from_api_unescapes_name():
             "modelName": "Sergio&amp;#39;s llaves",
             "modelID": "EI-T5600",
             "deviceTypeCode": "TAG",
-            "icons": {"coloredIcon": "https://x/icon.png"},
+            "icons": {"coloredIcon": "https://img.samsungcloud.com/icon.png"},
         }
     )
     assert dev.name == "Sergio's llaves"
     assert dev.is_tag
-    assert dev.icon_url == "https://x/icon.png"
+    assert dev.icon_url == "https://img.samsungcloud.com/icon.png"
 
 
 def test_newest_plain_location_wins():
@@ -125,3 +127,19 @@ def test_battery_levels():
 def test_state_without_operations():
     state = parse_device_state({})
     assert state.location is None and state.battery is None
+
+
+def test_icon_url_only_from_samsung_https():
+    ok = "https://img.samsungcloud.com/tag.png"
+    assert safe_icon_url(ok) == ok
+    assert safe_icon_url("https://www.samsung.com/x.png")
+    assert safe_icon_url("http://img.samsungcloud.com/tag.png") is None
+    assert safe_icon_url("https://tracker.example/pixel.gif") is None
+    assert safe_icon_url("https://samsung.com.evil.example/x.png") is None
+    assert safe_icon_url("javascript:alert(1)") is None
+    assert safe_icon_url(None) is None
+
+
+def test_qr_regex_rejects_markdown_injection():
+    page = "x='https://signin.samsung.com/key/AbC-12_3)](https://evil.example)'"
+    assert stf_api._QR_URL_RE.search(page).group(0) == "https://signin.samsung.com/key/AbC-12_3"

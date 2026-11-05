@@ -22,7 +22,8 @@ PLATFORMS: list[Platform] = [Platform.DEVICE_TRACKER, Platform.SENSOR, Platform.
 async def async_setup_entry(hass: HomeAssistant, entry: SmartThingsFindConfigEntry) -> bool:
     """Configura una cuenta de SmartThings Find."""
     # Sesión HTTP propia con su propio cookie jar: así la cookie de Samsung no
-    # se mezcla con la sesión compartida de Home Assistant.
+    # se mezcla con la sesión compartida de Home Assistant. HA la cierra
+    # automáticamente al descargar la entrada (y con ella la cookie).
     session = async_create_clientsession(hass, cookie_jar=aiohttp.CookieJar())
     client = SmartThingsFindClient(session, entry.data[CONF_JSESSIONID])
 

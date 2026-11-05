@@ -60,6 +60,13 @@ SmartTag2) y del resto de dispositivos de tu cuenta en
 - Los botones físicos del tag **no** se gestionan aquí (usa la integración
   oficial de SmartThings para eso).
 
+### Seguridad y privacidad
+
+La integración sólo se conecta a servidores de Samsung y no envía datos a
+terceros. La cookie de sesión da acceso completo a SmartThings Find, así que
+conviene proteger las copias de seguridad de Home Assistant. Más detalles y
+recomendaciones en [SECURITY.md](SECURITY.md).
+
 ## Entidades que crea
 
 Por cada dispositivo de la cuenta:

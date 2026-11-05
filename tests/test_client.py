@@ -16,6 +16,8 @@ class FakeSamsung:
     """Simula account.samsung.com + smartthingsfind.samsung.com en un único host."""
 
     def __init__(self) -> None:
+        self.next_url = "/complete"
+        self.redirect_to: str | None = None
         self.polls = 0
         self.scanned_after = 2
         self.session_valid = True
@@ -55,12 +57,12 @@ class FakeSamsung:
         self.polls += 1
         if self.polls < self.scanned_after:
             return web.json_response({"rtnCd": "POLLING"})
-        return web.json_response({"rtnCd": "SUCCESS", "nextURL": "/complete"})
+        return web.json_response({"rtnCd": "SUCCESS", "nextURL": self.next_url})
 
     async def complete(self, req):
-        base = str(req.url.origin())
+        target = self.redirect_to or f"{req.url.origin()}/login.do?code=xyz&amp;state=s"
         return web.Response(
-            text=f"<script>window.location.href = '{base}/login.do?code=xyz&amp;state=s';</script>",
+            text=f"<script>window.location.href = '{target}';</script>",
             content_type="text/html",
         )
 
@@ -228,3 +230,38 @@ async def test_client_detects_expired_session(fake):
         client = stf_api.SmartThingsFindClient(session, "WRONG")
         with pytest.raises(stf_api.SmartThingsFindAuthError):
             await client.async_refresh_csrf()
+
+
+@pytest.mark.parametrize(
+    ("next_url", "redirect_to"),
+    [
+        ("https://evil.example/complete", None),
+        ("//evil.example/complete", None),
+        (None, "https://evil.example/login.do?code=xyz"),
+        (None, "http://smartthingsfind.samsung.com/login.do?code=xyz"),
+    ],
+)
+async def test_login_refuses_foreign_redirects(fake, next_url, redirect_to):
+    """El código de autorización nunca debe enviarse fuera de Samsung."""
+    if next_url:
+        fake.next_url = next_url
+    fake.redirect_to = redirect_to
+    async with _session() as session:
+        login = stf_api.QrLogin(session)
+        await login.start()
+        with pytest.raises(stf_api.SmartThingsFindError, match="Destino inesperado"):
+            await login.wait(timeout=5, poll_interval=0.01)
+
+
+async def test_errors_do_not_leak_csrf_or_body(fake):
+    async with _session() as session:
+        client = stf_api.SmartThingsFindClient(session, "SESSION-1")
+        await client.async_refresh_csrf()
+        stf_api_url = stf_api.URL_DEVICE_LIST
+        stf_api.URL_DEVICE_LIST = stf_api_url.replace("getDeviceList", "missing")
+        try:
+            with pytest.raises(stf_api.SmartThingsFindError) as exc:
+                await client.async_get_devices()
+        finally:
+            stf_api.URL_DEVICE_LIST = stf_api_url
+    assert "csrf" not in str(exc.value).lower()
