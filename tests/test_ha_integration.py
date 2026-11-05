@@ -76,7 +76,6 @@ async def test_setup_creates_entities(hass: HomeAssistant) -> None:
         assert tracker.attributes["latitude"] == 43.263
         assert tracker.attributes["longitude"] == -2.935
         assert tracker.attributes["gps_accuracy"] == 15
-        assert tracker.attributes["battery_level"] == 50
         assert tracker.attributes["source_type"] == "gps"
 
         assert hass.states.get("sensor.llaves_battery").state == "50"

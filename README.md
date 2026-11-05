@@ -73,7 +73,7 @@ Por cada dispositivo de la cuenta:
 
 | Entidad | Descripción |
 |---|---|
-| `device_tracker.<nombre>` | Posición en el mapa (lat/lon, `gps_accuracy`, `battery_level`, `last_seen`, `location_source`). |
+| `device_tracker.<nombre>` | Posición en el mapa (lat/lon, `gps_accuracy`, `last_seen`, `location_source`). |
 | `sensor.<nombre>_battery` | Batería. En los tags es aproximada: `FULL`=100, `MEDIUM`=50, `LOW`=15, `VERY_LOW`=5 (el valor original está en `raw_level`). |
 | `sensor.<nombre>_last_seen` | Fecha/hora (UTC) de la última posición conocida. |
 | `button.<nombre>_ring` | Hace sonar el dispositivo. |

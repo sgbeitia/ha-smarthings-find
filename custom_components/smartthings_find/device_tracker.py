@@ -60,11 +60,6 @@ class SmartThingsFindTracker(SmartThingsFindEntity, TrackerEntity):
         return float(loc.accuracy) if loc and loc.accuracy is not None else 0.0
 
     @property
-    def battery_level(self) -> int | None:
-        state = self.state_data
-        return state.battery if state else None
-
-    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         state = self.state_data
         attrs: dict[str, Any] = {
