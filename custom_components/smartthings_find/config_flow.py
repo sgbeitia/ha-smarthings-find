@@ -41,7 +41,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-QR_TIMEOUT = 180  # segundos
+QR_TIMEOUT = 600  # segundos (Samsung da 10 minutos de validez al QR)
 
 
 def _new_private_session() -> aiohttp.ClientSession:
@@ -69,6 +69,7 @@ class SmartThingsFindConfigFlow(ConfigFlow, domain=DOMAIN):
         self._login_task: asyncio.Task[None] | None = None
         self._qr_url: str | None = None
         self._qr_image: str | None = None
+        self._pin: str | None = None
         self._jsessionid: str | None = None
         self._user_id: str | None = None
         self._error: str | None = None
@@ -96,7 +97,7 @@ class SmartThingsFindConfigFlow(ConfigFlow, domain=DOMAIN):
     def _locale(self) -> str:
         lang = (self.hass.config.language or "en").split("-")[0].lower()
         country = (self.hass.config.country or "").upper()
-        return f"{lang}_{country}" if country else "en_US"
+        return f"{lang}-{country}" if country else "en-US"
 
     async def async_step_qr(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Muestra el QR y espera (en segundo plano) a que se escanee."""
@@ -117,7 +118,8 @@ class SmartThingsFindConfigFlow(ConfigFlow, domain=DOMAIN):
                 lambda: qr.png_data_uri(scale=6, border=2)
             )
             self._error = None
-            self._login_task = self.hass.async_create_task(self._async_wait_for_login())
+            self._pin = None
+            self._login_task = self.hass.async_create_task(self._async_wait_for_scan())
 
         if not self._login_task.done():
             return self.async_show_progress(
@@ -133,14 +135,49 @@ class SmartThingsFindConfigFlow(ConfigFlow, domain=DOMAIN):
         self._login_task = None
         if self._error:
             return self.async_show_progress_done(next_step_id="login_failed")
+        return self.async_show_progress_done(next_step_id="approve")
+
+    async def _async_wait_for_scan(self) -> None:
+        """Tarea de fondo: espera a que se escanee el QR (y obtiene el PIN)."""
+        assert self._login is not None
+        try:
+            self._pin = await self._login.wait_for_scan(timeout=QR_TIMEOUT)
+        except SmartThingsFindLoginTimeout:
+            self._error = "timeout"
+        except SmartThingsFindError as err:
+            _LOGGER.error("Error en el login de SmartThings Find: %s", err)
+            self._error = "login_failed"
+        if self._error:
+            await self._async_close_login_session()
+
+    async def async_step_approve(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Muestra el PIN y espera a que el usuario apruebe en el móvil."""
+        if self._login_task is None:
+            self._error = None
+            self._login_task = self.hass.async_create_task(self._async_complete_login())
+
+        if not self._login_task.done():
+            return self.async_show_progress(
+                step_id="approve",
+                progress_action="approve_login",
+                description_placeholders={"pin": self._pin or "—"},
+                progress_task=self._login_task,
+            )
+
+        self._login_task = None
+        if self._error:
+            return self.async_show_progress_done(next_step_id="login_failed")
         return self.async_show_progress_done(next_step_id="finish")
 
-    async def _async_wait_for_login(self) -> None:
-        """Tarea de fondo: espera al QR y valida la sesión obtenida."""
+    async def _async_complete_login(self) -> None:
+        """Tarea de fondo: espera la aprobación, completa el login y lo valida."""
         assert self._login is not None
         check_session: aiohttp.ClientSession | None = None
         try:
-            jsessionid = await self._login.wait(timeout=QR_TIMEOUT)
+            await self._login.wait_for_approval(timeout=QR_TIMEOUT)
+            jsessionid = await self._login.finish()
             await self._async_close_login_session()
             # Validamos la sesión con una sesión HTTP limpia y obtenemos el id
             # de usuario (para identificar la cuenta de forma única).

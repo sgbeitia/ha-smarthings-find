@@ -23,12 +23,14 @@ SmartTag2) y del resto de dispositivos de tu cuenta en
 ### Cómo funciona
 
 1. **Login**: se reproduce el inicio de sesión con **código QR** de Samsung
-   Account (`account.samsung.com/accounts/v1/FMM2/...`). Escaneas el QR con tu
-   móvil, apruebas el acceso y la integración obtiene la cookie de sesión
-   `JSESSIONID` de SmartThings Find. **Tu contraseña nunca pasa por Home
-   Assistant.**
-2. **Token CSRF**: `GET /chkLogin.do` devuelve la cabecera `_csrf` que se
-   adjunta a cada petición.
+   Account (el sistema "IAM" que Samsung estrenó en 2026). SmartThings Find
+   emite un `state` (`/getState.do`), Samsung Account crea un reto de
+   credenciales con su QR (`/api/challenges/credentials/…/qr-codes`), lo
+   escaneas con el móvil, confirmas el **PIN** que muestra Home Assistant y la
+   integración recibe la cookie de sesión `JSESSIONID` de SmartThings Find.
+   **Tu contraseña nunca pasa por Home Assistant.**
+2. **Token CSRF**: `GET /init.do` (o `/chkLogin.do` como respaldo) devuelve
+   la cabecera `_csrf` que se adjunta a cada petición.
 3. **Dispositivos**: `POST /device/getDeviceList.do`.
 4. **Posición/batería**: `POST /device/setLastSelect.do` devuelve una lista de
    "operaciones" (`LOCATION`, `LASTLOC`, `OFFLINE_LOC`, `CHECK_CONNECTION`…).
@@ -97,9 +99,14 @@ Copia `custom_components/smartthings_find` en
 1. *Ajustes → Dispositivos y servicios → Añadir integración* → busca
    **SmartThings Find** (no confundir con la integración oficial *SmartThings*).
 2. Pulsa *Enviar*: aparecerá un **código QR**. Escanéalo con la cámara de un
-   móvil con sesión iniciada en tu cuenta Samsung y aprueba el acceso
-   (caduca en 3 minutos).
-3. Se crearán los dispositivos y entidades automáticamente.
+   móvil con sesión iniciada en tu cuenta Samsung (caduca en 10 minutos).
+3. Home Assistant mostrará un **PIN**: confírmalo en el móvil y aprueba el
+   inicio de sesión.
+4. Se crearán los dispositivos y entidades automáticamente.
+
+Si el inicio de sesión falla porque Samsung pide un paso adicional
+(verificación en dos pasos, aceptar términos…), inicia sesión una vez en
+https://smartthingsfind.samsung.com/ desde el navegador y vuelve a intentarlo.
 
 ### Opciones
 

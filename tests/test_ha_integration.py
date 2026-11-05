@@ -104,20 +104,21 @@ async def test_expired_session_starts_reauth(hass: HomeAssistant) -> None:
 
 async def test_config_flow_qr(hass: HomeAssistant) -> None:
     scanned = asyncio.Event()
+    approved = asyncio.Event()
 
-    async def fake_wait(*args, **kwargs):
+    async def fake_scan(*args, **kwargs):
         await scanned.wait()
-        return "NEW-SESSION"
+        return "42"
 
+    async def fake_approval(*args, **kwargs):
+        await approved.wait()
+
+    flow_mod = "custom_components.smartthings_find.config_flow.QrLogin"
     with (
-        patch(
-            "custom_components.smartthings_find.config_flow.QrLogin.start",
-            AsyncMock(return_value="https://signin.samsung.com/key/AbC123"),
-        ),
-        patch(
-            "custom_components.smartthings_find.config_flow.QrLogin.wait",
-            fake_wait,
-        ),
+        patch(f"{flow_mod}.start", AsyncMock(return_value="https://signin.samsung.com/key/AbC123")),
+        patch(f"{flow_mod}.wait_for_scan", fake_scan),
+        patch(f"{flow_mod}.wait_for_approval", fake_approval),
+        patch(f"{flow_mod}.finish", AsyncMock(return_value="NEW-SESSION")),
         _patch_client(),
         patch(f"{CLIENT}.jsessionid", "NEW-SESSION"),
     ):
@@ -127,13 +128,38 @@ async def test_config_flow_qr(hass: HomeAssistant) -> None:
         assert result["type"] is FlowResultType.FORM
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
         assert result["type"] is FlowResultType.SHOW_PROGRESS, result
+        assert result["step_id"] == "qr"
         assert result["description_placeholders"]["qr_image"].startswith("data:image/png;base64,")
+
         scanned.set()  # el usuario escanea el QR
         await hass.async_block_till_done()
         result = await hass.config_entries.flow.async_configure(result["flow_id"])
-        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert result["type"] is FlowResultType.SHOW_PROGRESS
+        assert result["step_id"] == "approve"
+        assert result["description_placeholders"]["pin"] == "42"
+
+        approved.set()  # el usuario aprueba en el móvil
+        await hass.async_block_till_done()
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+        assert result["type"] is FlowResultType.CREATE_ENTRY, result
         assert result["data"] == {CONF_JSESSIONID: "NEW-SESSION"}
         assert result["result"].unique_id == "user-9"
+
+
+async def test_config_flow_cannot_generate_qr(hass: HomeAssistant) -> None:
+    """Si Samsung no genera el QR, se aborta con un motivo claro."""
+    from custom_components.smartthings_find.api import SmartThingsFindError
+
+    with patch(
+        "custom_components.smartthings_find.config_flow.QrLogin.start",
+        AsyncMock(side_effect=SmartThingsFindError("boom")),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "cannot_connect"
 
 
 async def test_options_flow(hass: HomeAssistant) -> None:

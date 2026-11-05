@@ -15,11 +15,12 @@
       }
     },
     "progress": {
-      "scan_qr": "Scan this code with your phone and approve the Samsung Account sign-in (expires in 3 minutes):\n\n![QR code]({qr_image})\n\nIf you are on that phone, open this link: [{qr_url}]({qr_url})"
+      "scan_qr": "Scan this code with the camera of a phone signed in to your Samsung account (expires in 10 minutes):\n\n![QR code]({qr_image})\n\nIf you are on that phone, open this link: [{qr_url}]({qr_url})",
+      "approve_login": "Code scanned. Confirm the sign-in on your phone. If it asks for a number, choose this one:\n\n## {pin}\n\nWaiting for approval…"
     },
     "error": {
-      "timeout": "The QR code expired before it was scanned.",
-      "login_failed": "Samsung rejected or did not complete the sign-in. Check the logs for details."
+      "timeout": "The QR code expired before the sign-in was completed.",
+      "login_failed": "Samsung rejected or did not complete the sign-in. Check the logs: if Samsung asks for an extra step (e.g. two-step verification or accepting terms), sign in once at smartthingsfind.samsung.com in a browser and try again."
     },
     "abort": {
       "already_configured": "This account is already configured.",
@@ -47,10 +48,14 @@
   },
   "entity": {
     "sensor": {
-      "last_seen": { "name": "Last seen" }
+      "last_seen": {
+        "name": "Last seen"
+      }
     },
     "button": {
-      "ring": { "name": "Ring" }
+      "ring": {
+        "name": "Ring"
+      }
     }
   }
 }

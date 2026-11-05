@@ -15,11 +15,12 @@
       }
     },
     "progress": {
-      "scan_qr": "Escanea este código con tu móvil y aprueba el inicio de sesión en Samsung Account (caduca en 3 minutos):\n\n![Código QR]({qr_image})\n\nSi estás en el propio móvil, abre este enlace: [{qr_url}]({qr_url})"
+      "scan_qr": "Escanea este código con la cámara de un móvil con sesión iniciada en tu cuenta Samsung (caduca en 10 minutos):\n\n![Código QR]({qr_image})\n\nSi estás en el propio móvil, abre este enlace: [{qr_url}]({qr_url})",
+      "approve_login": "Código escaneado. En el móvil, confirma el inicio de sesión. Si te pide un número, elige este:\n\n## {pin}\n\nEsperando la aprobación…"
     },
     "error": {
-      "timeout": "El código QR caducó antes de escanearse.",
-      "login_failed": "Samsung rechazó o no completó el inicio de sesión. Revisa los registros para más detalles."
+      "timeout": "El código QR caducó antes de completarse el inicio de sesión.",
+      "login_failed": "Samsung rechazó o no completó el inicio de sesión. Revisa los registros: si Samsung pide un paso adicional (p. ej. verificación en dos pasos o aceptar términos), inicia sesión una vez en smartthingsfind.samsung.com desde el navegador y reinténtalo."
     },
     "abort": {
       "already_configured": "Esta cuenta ya está configurada.",
@@ -47,10 +48,14 @@
   },
   "entity": {
     "sensor": {
-      "last_seen": { "name": "Última posición" }
+      "last_seen": {
+        "name": "Última posición"
+      }
     },
     "button": {
-      "ring": { "name": "Hacer sonar" }
+      "ring": {
+        "name": "Hacer sonar"
+      }
     }
   }
 }

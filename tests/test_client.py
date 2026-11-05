@@ -1,4 +1,8 @@
-"""Tests del login QR y del cliente contra un servidor Samsung simulado."""
+"""Tests del login QR y del cliente contra un servidor Samsung simulado.
+
+El servidor simulado reproduce el flujo observado en los servidores reales de
+Samsung Account (login "IAM", 2026) y de SmartThings Find.
+"""
 
 from __future__ import annotations
 
@@ -16,70 +20,132 @@ class FakeSamsung:
     """Simula account.samsung.com + smartthingsfind.samsung.com en un único host."""
 
     def __init__(self) -> None:
-        self.next_url = "/complete"
-        self.redirect_to: str | None = None
-        self.polls = 0
-        self.scanned_after = 2
+        # Comportamiento configurable desde los tests.
+        self.pin_after = 2  # nº de consultas hasta que aparece el PIN
+        self.login_after = 4  # nº de consultas hasta que se aprueba
+        self.send_pin = True
+        self.final_page = "complete"
+        self.redirect_to: str | None = None  # Location final (None = login.do válido)
+        self.require_sa_did = True
         self.session_valid = True
+
+        self.polls = 0
         self.csrf_rotations = 0
         self.operations: list[dict] = []
+        self.calls: list[str] = []
         app = web.Application()
         r = app.router
-        r.add_get("/gate", self.gate)
-        r.add_get("/qr", self.qr_page)
-        r.add_get("/xhr", self.xhr)
-        r.add_post("/poll", self.poll)
-        r.add_get("/complete", self.complete)
+        # SmartThings Find (pre-login)
+        r.add_get("/getState.do", self.get_state)
+        # Samsung Account
+        r.add_get("/iam/oauth2/authorize", self.authorize)
+        r.add_post("/api/auths", self.create_auth)
+        r.add_post("/api/challenges/credentials", self.create_challenge)
+        r.add_post("/api/challenges/credentials/{key}/qr-codes", self.create_qr)
+        r.add_get("/api/challenges/credentials/{key}/qr-codes", self.poll_qr)
+        r.add_patch("/api/challenges/credentials/{key}/qr-codes", self.confirm_qr)
+        r.add_patch("/api/contexts/auths/{ctx}", self.update_context)
+        r.add_get("/api/auths/{ctx}", self.get_auth)
+        r.add_get("/api/auths/{ctx}/url", self.auth_url)
+        # SmartThings Find
         r.add_get("/login.do", self.login_do)
+        r.add_get("/init.do", self.init)
         r.add_get("/chkLogin.do", self.chk)
-        r.add_post("/getDeviceList.do", self.devices)
-        r.add_post("/setLastSelect.do", self.last_select)
-        r.add_post("/addOperation.do", self.add_operation)
+        r.add_post("/device/getDeviceList.do", self.devices)
+        r.add_post("/device/setLastSelect.do", self.last_select)
+        r.add_post("/dm/addOperation.do", self.add_operation)
         self.app = app
 
-    async def gate(self, req):
-        resp = web.Response(text="ok")
-        resp.set_cookie("acct", "1")
+    # ---- login ---------------------------------------------------------
+
+    async def get_state(self, req):
+        assert req.query["payload"] == "hound"
+        resp = web.Response(text='{"state":"STATE-123::hound"}', content_type="text/plain")
+        resp.set_cookie("JSESSIONID", "PRELOGIN")
         return resp
 
-    async def qr_page(self, req):
-        assert req.cookies.get("acct") == "1"
-        return web.Response(
-            text="<script>var u = 'https://signin.samsung.com/key/AbC123';</script>",
-            content_type="text/html",
+    async def authorize(self, req):
+        assert req.query["state"] == "STATE-123::hound"
+        assert req.query["client_id"] == "ntly6zvfpn"
+        return web.Response(text="<html></html>", content_type="text/html")
+
+    async def create_auth(self, req):
+        body = await req.json()
+        assert req.headers["x-app-id"] == "ntly6zvfpn"
+        assert body["authType"] == "OAUTH2"
+        assert body["state"] == "STATE-123::hound"
+        self.calls.append("auths")
+        return web.json_response({"key": "CTX1"}, status=201)
+
+    async def create_challenge(self, req):
+        assert (await req.json()) == {"contextKey": "CTX1"}
+        return web.json_response({"key": "CH1"}, status=201)
+
+    async def create_qr(self, req):
+        if self.require_sa_did and not req.cookies.get("sa_did"):
+            return web.json_response(
+                {"error": {"code": "BadArgument", "message": "Required cookie 'sa_did'"}},
+                status=400,
+            )
+        assert (await req.json()) == {"deviceType": "Web"}
+        return web.json_response(
+            {
+                "userCode": "abcd1234",
+                "expiryInSeconds": "600",
+                "expiresAt": 0,
+                "pollingInterval": "2",
+                "url": "https://signin.samsung.com/key/",
+            },
+            status=201,
         )
 
-    async def xhr(self, req):
-        return web.json_response({"_csrf": {"token": "acct-csrf"}})
-
-    async def poll(self, req):
-        assert req.headers["X-Csrf-Token"] == "acct-csrf"
+    async def poll_qr(self, req):
         self.polls += 1
-        if self.polls < self.scanned_after:
-            return web.json_response({"rtnCd": "POLLING"})
-        return web.json_response({"rtnCd": "SUCCESS", "nextURL": self.next_url})
+        if self.polls >= self.login_after:
+            return web.json_response({"userPin": "42", "loginId": "LOGIN-1"})
+        if self.send_pin and self.polls >= self.pin_after:
+            return web.json_response({"userPin": "42"})
+        return web.json_response({})
 
-    async def complete(self, req):
-        target = self.redirect_to or f"{req.url.origin()}/login.do?code=xyz&amp;state=s"
-        return web.Response(
-            text=f"<script>window.location.href = '{target}';</script>",
-            content_type="text/html",
+    async def confirm_qr(self, req):
+        self.calls.append("confirm_qr")
+        return web.Response(status=204)
+
+    async def update_context(self, req):
+        assert (await req.json()) == {"challengeKey": "CH1", "step": "CREDENTIAL"}
+        self.calls.append("update_context")
+        return web.Response(status=204)
+
+    async def get_auth(self, req):
+        return web.json_response({"page": self.final_page})
+
+    async def auth_url(self, req):
+        assert req.query["state"] == "STATE-123::hound"
+        location = self.redirect_to or (
+            f"{req.url.origin()}/login.do?code=xyz&state=STATE-123::hound"
         )
+        return web.Response(status=302, headers={"Location": location})
 
     async def login_do(self, req):
         assert req.query["code"] == "xyz"
+        assert req.cookies.get("JSESSIONID") == "PRELOGIN"
         resp = web.Response(text="ok")
         resp.set_cookie("JSESSIONID", "SESSION-1")
         return resp
 
+    # ---- datos ---------------------------------------------------------
+
     def _authed(self, req) -> bool:
         return self.session_valid and req.cookies.get("JSESSIONID") == "SESSION-1"
 
-    async def chk(self, req):
+    async def init(self, req):
         if not self._authed(req):
-            return web.Response(text="Logout")
+            return web.Response(status=403, text="logout")
         self.csrf_rotations += 1
-        return web.Response(text="", headers={"_csrf": f"stf-csrf-{self.csrf_rotations}"})
+        return web.json_response({}, headers={"_csrf": f"stf-csrf-{self.csrf_rotations}"})
+
+    async def chk(self, req):
+        return web.Response(text="fail")
 
     def _check_csrf(self, req):
         if not self._authed(req):
@@ -153,17 +219,18 @@ def _allow_localhost_sockets():
 async def fake(_allow_localhost_sockets, monkeypatch, aiohttp_server):
     fake = FakeSamsung()
     server = await aiohttp_server(fake.app)
-    base = str(server.make_url(""))
+    base = str(server.make_url("")).rstrip("/")
     monkeypatch.setattr(stf_api, "ACCOUNT_BASE", base)
-    monkeypatch.setattr(stf_api, "URL_SIGNIN_GATE", base + "/gate?state={state}&locale={locale}")
-    monkeypatch.setattr(stf_api, "URL_QR_PAGE", base + "/qr")
-    monkeypatch.setattr(stf_api, "URL_SIGNIN_XHR", base + "/xhr")
-    monkeypatch.setattr(stf_api, "URL_QR_POLL", base + "/poll")
+    monkeypatch.setattr(stf_api, "ACCOUNT_API", base + "/api")
+    monkeypatch.setattr(stf_api, "URL_AUTHORIZE", base + "/iam/oauth2/authorize")
+    monkeypatch.setattr(stf_api, "STF_BASE", base)
     monkeypatch.setattr(stf_api, "STF_URL", URL(base + "/"))
+    monkeypatch.setattr(stf_api, "URL_GET_STATE", base + "/getState.do")
+    monkeypatch.setattr(stf_api, "URL_INIT", base + "/init.do")
     monkeypatch.setattr(stf_api, "URL_CHK_LOGIN", base + "/chkLogin.do")
-    monkeypatch.setattr(stf_api, "URL_DEVICE_LIST", base + "/getDeviceList.do")
-    monkeypatch.setattr(stf_api, "URL_SET_LAST_SELECT", base + "/setLastSelect.do")
-    monkeypatch.setattr(stf_api, "URL_ADD_OPERATION", base + "/addOperation.do")
+    monkeypatch.setattr(stf_api, "URL_DEVICE_LIST", base + "/device/getDeviceList.do")
+    monkeypatch.setattr(stf_api, "URL_SET_LAST_SELECT", base + "/device/setLastSelect.do")
+    monkeypatch.setattr(stf_api, "URL_ADD_OPERATION", base + "/dm/addOperation.do")
     return fake
 
 
@@ -172,22 +239,59 @@ def _session():
     return aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
 
 
-async def test_qr_login_flow(fake):
+async def test_qr_login_flow_with_pin(fake):
     async with _session() as session:
         login = stf_api.QrLogin(session)
-        assert await login.start() == "https://signin.samsung.com/key/AbC123"
-        jsessionid = await login.wait(timeout=5, poll_interval=0.01)
-    assert jsessionid == "SESSION-1"
-    assert fake.polls == 2
+        assert await login.start() == "https://signin.samsung.com/key/abcd1234"
+        assert await login.wait_for_scan(timeout=5, poll_interval=0.01) == "42"
+        await login.wait_for_approval(timeout=5, poll_interval=0.01)
+        assert await login.finish() == "SESSION-1"
+    assert fake.calls == ["auths", "confirm_qr", "update_context"]
+
+
+async def test_qr_login_without_pin(fake):
+    fake.send_pin = False
+    async with _session() as session:
+        login = stf_api.QrLogin(session, locale="en_GB")
+        await login.start()
+        assert await login.wait_for_scan(timeout=5, poll_interval=0.01) is None
+        await login.wait_for_approval(timeout=5, poll_interval=0.01)  # no espera más
+        assert await login.finish() == "SESSION-1"
+
+
+async def test_qr_login_shortcut(fake):
+    async with _session() as session:
+        login = stf_api.QrLogin(session)
+        await login.start()
+        assert await login.wait(timeout=5, poll_interval=0.01) == "SESSION-1"
 
 
 async def test_qr_login_timeout(fake):
-    fake.scanned_after = 10_000
+    fake.pin_after = fake.login_after = 10_000
     async with _session() as session:
         login = stf_api.QrLogin(session)
         await login.start()
         with pytest.raises(stf_api.SmartThingsFindLoginTimeout):
-            await login.wait(timeout=0.05, poll_interval=0.01)
+            await login.wait_for_scan(timeout=0.05, poll_interval=0.01)
+
+
+async def test_qr_login_extra_step_is_reported(fake):
+    fake.final_page = "mfaVerification"
+    async with _session() as session:
+        login = stf_api.QrLogin(session)
+        await login.start()
+        await login.wait_for_scan(timeout=5, poll_interval=0.01)
+        await login.wait_for_approval(timeout=5, poll_interval=0.01)
+        with pytest.raises(stf_api.SmartThingsFindError, match="mfaVerification"):
+            await login.finish()
+
+
+async def test_qr_requires_device_id_cookie(fake):
+    """Regresión: sin la cookie ``sa_did`` Samsung no genera el QR."""
+    async with _session() as session:
+        login = stf_api.QrLogin(session)
+        assert (await login.start()).startswith(stf_api.QR_URL_PREFIX)
+        assert session.cookie_jar.filter_cookies(URL(stf_api.ACCOUNT_BASE + "/")).get("sa_did")
 
 
 async def test_client_devices_state_ring(fake):
@@ -233,35 +337,32 @@ async def test_client_detects_expired_session(fake):
 
 
 @pytest.mark.parametrize(
-    ("next_url", "redirect_to"),
+    "redirect_to",
     [
-        ("https://evil.example/complete", None),
-        ("//evil.example/complete", None),
-        (None, "https://evil.example/login.do?code=xyz"),
-        (None, "http://smartthingsfind.samsung.com/login.do?code=xyz"),
+        "https://evil.example/login.do?code=xyz",
+        "//evil.example/login.do?code=xyz",
+        "http://smartthingsfind.samsung.com/login.do?code=xyz",
     ],
 )
-async def test_login_refuses_foreign_redirects(fake, next_url, redirect_to):
-    """El código de autorización nunca debe enviarse fuera de Samsung."""
-    if next_url:
-        fake.next_url = next_url
+async def test_login_refuses_foreign_redirects(fake, redirect_to):
+    """El código de autorización nunca debe enviarse fuera de SmartThings Find."""
     fake.redirect_to = redirect_to
     async with _session() as session:
         login = stf_api.QrLogin(session)
         await login.start()
+        await login.wait_for_scan(timeout=5, poll_interval=0.01)
+        await login.wait_for_approval(timeout=5, poll_interval=0.01)
         with pytest.raises(stf_api.SmartThingsFindError, match="Destino inesperado"):
-            await login.wait(timeout=5, poll_interval=0.01)
+            await login.finish()
 
 
-async def test_errors_do_not_leak_csrf_or_body(fake):
+async def test_errors_do_not_leak_csrf_or_body(fake, monkeypatch):
     async with _session() as session:
         client = stf_api.SmartThingsFindClient(session, "SESSION-1")
         await client.async_refresh_csrf()
-        stf_api_url = stf_api.URL_DEVICE_LIST
-        stf_api.URL_DEVICE_LIST = stf_api_url.replace("getDeviceList", "missing")
-        try:
-            with pytest.raises(stf_api.SmartThingsFindError) as exc:
-                await client.async_get_devices()
-        finally:
-            stf_api.URL_DEVICE_LIST = stf_api_url
+        monkeypatch.setattr(
+            stf_api, "URL_DEVICE_LIST", stf_api.URL_DEVICE_LIST.replace("getDeviceList", "missing")
+        )
+        with pytest.raises(stf_api.SmartThingsFindError) as exc:
+            await client.async_get_devices()
     assert "csrf" not in str(exc.value).lower()

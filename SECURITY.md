@@ -10,13 +10,14 @@ No. Se ha revisado todo `custom_components/smartthings_find/`:
 | Comprobación | Resultado |
 |---|---|
 | Hosts a los que se conecta | Sólo `account.samsung.com` (login) y `smartthingsfind.samsung.com` (datos). No hay telemetría, analítica ni servidores propios. |
-| Redirecciones durante el login | Las dos URLs que llegan dentro de las respuestas de Samsung se validan: sólo se siguen si son `https` y del host exacto de Samsung. Así el código de autorización nunca puede acabar en un tercero (hay tests para ello). |
+| Redirecciones durante el login | La redirección final que devuelve Samsung (la que lleva el código de autorización) se valida: sólo se sigue si es `https` hacia `smartthingsfind.samsung.com`. Así el código nunca puede acabar en un tercero (hay tests para ello). El contenido del QR también se valida (`https://signin.samsung.com/key/<alfanumérico>`). |
 | TLS | Siempre `https` con verificación de certificados (contexto TLS de Home Assistant). |
 | Ejecución dinámica de código | No hay `eval`, `exec`, `subprocess`, `pickle` ni imports dinámicos. |
 | Escritura en disco | Ninguna propia. Home Assistant guarda la configuración de la entrada (ver punto 2). |
 | Registros (logs) | No se registran coordenadas, la cookie ni el token CSRF. Los errores sólo incluyen la ruta del endpoint y el código HTTP, nunca el cuerpo de la respuesta. |
 | Cookies | Sesiones HTTP aisladas con su propio cookie jar: la cookie de Samsung no se mezcla con otras integraciones. Las sesiones del login se cierran nada más terminar. |
 | Contraseña | Nunca pasa por Home Assistant: el login es por QR y se aprueba en el móvil. |
+| Identificador de dispositivo | Samsung exige una cookie `sa_did`; la integración genera un valor **aleatorio** en cada login, que no identifica tu Home Assistant ni tu red. |
 | Iconos | Sólo se muestran iconos `https` de dominios de Samsung. Cualquier otra URL se descarta, porque el navegador de quien abra Home Assistant la descargaría (riesgo de "píxel espía"). |
 | Enlace del QR | Sólo se acepta `https://signin.samsung.com/key/<alfanumérico>`, por lo que no se puede inyectar Markdown ni enlaces en el diálogo. |
 | Dependencias | Una sola: `segno` (generador de QR en Python puro, sin dependencias y sin código de red), fijada a una versión exacta. |

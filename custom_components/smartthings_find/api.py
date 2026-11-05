@@ -23,7 +23,6 @@ import json as jsonlib
 import logging
 import re
 import secrets
-import string
 import time
 from typing import Any
 
@@ -36,33 +35,29 @@ STF_BASE = "https://smartthingsfind.samsung.com"
 STF_URL = URL(STF_BASE + "/")
 ACCOUNT_BASE = "https://account.samsung.com"
 
-# client_id público y fijo que usa la web de SmartThings Find.
+# Parámetros OAuth públicos y fijos de la web de SmartThings Find.
 _CLIENT_ID = "ntly6zvfpn"
+_SCOPE = "iot.client"
+_ACR_VALUES = "urn:samsungaccount:acr:basic"
 
-URL_SIGNIN_GATE = (
-    ACCOUNT_BASE + "/accounts/v1/FMM2/signInGate"
-    "?state={state}"
-    "&redirect_uri=https:%2F%2Fsmartthingsfind.samsung.com%2Flogin.do"
-    "&response_type=code"
-    f"&client_id={_CLIENT_ID}"
-    "&scope=iot.client"
-    "&locale={locale}"
-    "&acr_values=urn:samsungaccount:acr:basic"
-    "&goBackURL=https:%2F%2Fsmartthingsfind.samsung.com%2Flogin"
-)
-URL_QR_PAGE = ACCOUNT_BASE + "/accounts/v1/FMM2/signInWithQrCode"
-URL_SIGNIN_XHR = ACCOUNT_BASE + "/accounts/v1/FMM2/signInXhr"
-URL_QR_POLL = ACCOUNT_BASE + "/accounts/v1/FMM2/signInWithQrCodeProc"
+# --- Samsung Account (nuevo login "IAM", 2026) -------------------------------
+URL_AUTHORIZE = ACCOUNT_BASE + "/iam/oauth2/authorize"
+ACCOUNT_API = ACCOUNT_BASE + "/api"
 
+# --- SmartThings Find ---------------------------------------------------------
+URL_GET_STATE = STF_BASE + "/getState.do"
+URL_INIT = STF_BASE + "/init.do"
 URL_CHK_LOGIN = STF_BASE + "/chkLogin.do"
 URL_DEVICE_LIST = STF_BASE + "/device/getDeviceList.do"
 URL_ADD_OPERATION = STF_BASE + "/dm/addOperation.do"
 URL_SET_LAST_SELECT = STF_BASE + "/device/setLastSelect.do"
 
-# Sólo aceptamos un identificador alfanumérico: la URL se muestra luego como
-# enlace Markdown en el config flow y no debe poder inyectar nada.
+# Prefijo de las URLs de los QR de Samsung. El contenido del QR es este prefijo
+# más un código corto; sólo aceptamos caracteres alfanuméricos para que la URL
+# (que se muestra como enlace Markdown en el config flow) no pueda inyectar nada.
+QR_URL_PREFIX = "https://signin.samsung.com/key/"
 _QR_URL_RE = re.compile(r"https://signin\.samsung\.com/key/[A-Za-z0-9_-]+")
-_REDIRECT_RE = re.compile(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]")
+_USER_CODE_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # Tipos de operación que contienen coordenadas.
 LOCATION_OPERATIONS = ("LOCATION", "LASTLOC", "OFFLINE_LOC")
@@ -316,99 +311,268 @@ def parse_device_state(data: dict[str, Any]) -> StfDeviceState:
 
 
 class QrLogin:
-    """Flujo de inicio de sesión con QR de Samsung Account.
+    """Inicio de sesión en Samsung Account con código QR.
 
-    Uso::
+    Reproduce el flujo de la web de Samsung Account (2026)::
 
         login = QrLogin(session)
-        qr_url = await login.start()          # mostrar este enlace como QR
-        jsessionid = await login.wait()        # bloquea hasta escanear o timeout
+        qr_url = await login.start()             # mostrar esta URL como QR
+        pin = await login.wait_for_scan()        # PIN a confirmar en el móvil (o None)
+        await login.wait_for_approval()          # el usuario aprueba en el móvil
+        jsessionid = await login.finish()        # cookie de SmartThings Find
 
     ``session`` debe ser un ``aiohttp.ClientSession`` con su PROPIO cookie
-    jar (no el compartido de Home Assistant).
+    jar (no el compartido de Home Assistant): el login usa cookies de
+    account.samsung.com y de smartthingsfind.samsung.com.
     """
 
-    def __init__(self, session: aiohttp.ClientSession, locale: str = "es_ES") -> None:
+    def __init__(self, session: aiohttp.ClientSession, locale: str = "es-ES") -> None:
         self._session = session
+        locale = locale.replace("_", "-")
         self._locale = locale
-        self._state = "".join(
-            secrets.choice(string.ascii_letters + string.digits) for _ in range(16)
-        )
+        lang, _, country = locale.partition("-")
+        self._language = lang.lower() or "en"
+        self._country = country.upper() or "US"
+        self._state: str | None = None
+        self._context_key: str | None = None
+        self._challenge_key: str | None = None
+        self._login_id: str | None = None
+        self._poll_interval = 2.0
+        self._expires_monotonic: float | None = None
         self.qr_url: str | None = None
+        self.pin: str | None = None
+
+    # -- utilidades HTTP ----------------------------------------------------
+
+    @property
+    def _headers(self) -> dict[str, str]:
+        # Las mismas cabeceras que añade el interceptor de la web de Samsung.
+        return {
+            "Accept": "application/json",
+            "x-app-id": _CLIENT_ID,
+            "x-locale": self._locale,
+        }
+
+    async def _api(self, method: str, path: str, json: Any = None) -> tuple[int, Any]:
+        """Llama a la API de Samsung Account y devuelve (status, json|None)."""
+        async with self._session.request(
+            method, ACCOUNT_API + path, json=json, headers=self._headers, timeout=_TIMEOUT
+        ) as res:
+            text = await res.text()
+            status = res.status
+        try:
+            data = jsonlib.loads(text) if text else None
+        except ValueError:
+            data = None
+        return status, data
+
+    @staticmethod
+    def _error_code(data: Any) -> str | None:
+        if isinstance(data, dict) and isinstance(data.get("error"), dict):
+            return data["error"].get("code")
+        return None
+
+    def _oauth_params(self) -> dict[str, str]:
+        assert self._state is not None
+        return {
+            "client_id": _CLIENT_ID,
+            "redirect_uri": STF_BASE + "/login.do",
+            "response_type": "code",
+            "scope": _SCOPE,
+            "state": self._state,
+            "locale": self._locale,
+            "acr_values": _ACR_VALUES,
+            "goBackURL": STF_BASE + "/login",
+        }
+
+    # -- pasos del login ----------------------------------------------------
 
     async def start(self) -> str:
-        """Abre la página de login y devuelve la URL que hay que codificar en el QR."""
+        """Prepara el login y devuelve la URL que hay que codificar en el QR."""
         s = self._session
         s.cookie_jar.clear()
         try:
-            async with s.get(
-                URL_SIGNIN_GATE.format(state=self._state, locale=self._locale),
-                timeout=_TIMEOUT,
-            ) as res:
+            # 1) SmartThings Find emite un ``state`` ligado a su sesión previa.
+            async with s.get(URL_GET_STATE, params={"payload": "hound"}, timeout=_TIMEOUT) as res:
                 if res.status != 200:
-                    raise SmartThingsFindError(f"signInGate devolvió HTTP {res.status}")
-            async with s.get(URL_QR_PAGE, timeout=_TIMEOUT) as res:
-                text = await res.text()
+                    raise SmartThingsFindError(f"getState devolvió HTTP {res.status}")
+                state_data = jsonlib.loads(await res.text())
+            self._state = str(state_data.get("state") or "")
+            if not self._state:
+                raise SmartThingsFindError("SmartThings Find no devolvió 'state'")
+
+            # 2) Página de autorización (fija cookies de Samsung Account).
+            async with s.get(URL_AUTHORIZE, params=self._oauth_params(), timeout=_TIMEOUT) as res:
                 if res.status != 200:
-                    raise SmartThingsFindError(f"signInWithQrCode devolvió HTTP {res.status}")
+                    raise SmartThingsFindError(f"authorize devolvió HTTP {res.status}")
+
+            # Identificador de dispositivo: la web lo genera en el navegador.
+            s.cookie_jar.update_cookies({"sa_did": secrets.token_hex(16)}, URL(ACCOUNT_BASE + "/"))
+
+            # 3) Contexto de autenticación OAuth2.
+            status, data = await self._api(
+                "POST",
+                "/auths",
+                {
+                    "authType": "OAUTH2",
+                    "clientId": _CLIENT_ID,
+                    "redirectUri": STF_BASE + "/login.do",
+                    "responseType": "code",
+                    "state": self._state,
+                    "countryCode": self._country,
+                    "languageCode": self._language,
+                    "scope": _SCOPE,
+                    "acrValues": _ACR_VALUES,
+                    "action": "signin",
+                },
+            )
+            if status not in (200, 201) or not isinstance(data, dict) or not data.get("key"):
+                raise SmartThingsFindError(f"No se pudo crear el contexto de login (HTTP {status})")
+            self._context_key = str(data["key"])
+
+            # 4) Reto de credenciales y 5) código QR.
+            status, data = await self._api(
+                "POST", "/challenges/credentials", {"contextKey": self._context_key}
+            )
+            if status not in (200, 201) or not isinstance(data, dict) or not data.get("key"):
+                raise SmartThingsFindError(f"No se pudo crear el reto de login (HTTP {status})")
+            self._challenge_key = str(data["key"])
+
+            status, data = await self._api(
+                "POST",
+                f"/challenges/credentials/{self._challenge_key}/qr-codes",
+                {"deviceType": "Web"},
+            )
         except aiohttp.ClientError as err:
             raise SmartThingsFindError(
                 f"Error de red al iniciar el login: {_net_error(err)}"
             ) from err
+        except ValueError as err:
+            raise SmartThingsFindError("Respuesta inesperada de SmartThings Find") from err
 
-        match = _QR_URL_RE.search(text)
-        if not match:
-            raise SmartThingsFindError("No se encontró la URL del QR en la página de Samsung")
-        self.qr_url = html.unescape(match.group(0))
+        if status not in (200, 201) or not isinstance(data, dict):
+            raise SmartThingsFindError(
+                f"No se pudo generar el QR (HTTP {status}, {self._error_code(data)})"
+            )
+        url, code = str(data.get("url") or ""), str(data.get("userCode") or "")
+        if url != QR_URL_PREFIX or not _USER_CODE_RE.fullmatch(code):
+            raise SmartThingsFindError("Samsung devolvió un QR con formato inesperado")
+
+        try:
+            self._poll_interval = max(1.0, float(data.get("pollingInterval") or 2))
+        except (TypeError, ValueError):
+            self._poll_interval = 2.0
+        try:
+            expiry = float(data.get("expiryInSeconds") or 600)
+        except (TypeError, ValueError):
+            expiry = 600.0
+        self._expires_monotonic = time.monotonic() + expiry
+        self.qr_url = url + code
         return self.qr_url
 
-    async def wait(self, timeout: float = 180, poll_interval: float = 2) -> str:
-        """Espera a que el usuario escanee el QR y devuelve el JSESSIONID de STF."""
+    async def _poll(self, timeout: float, poll_interval: float | None, want_pin: bool) -> None:
+        """Consulta el estado del QR hasta tener PIN (si ``want_pin``) o loginId."""
+        if self._challenge_key is None:
+            raise SmartThingsFindError("Hay que llamar antes a start()")
+        interval = poll_interval if poll_interval is not None else self._poll_interval
+        deadline = time.monotonic() + timeout
+        if self._expires_monotonic is not None:
+            deadline = min(deadline, self._expires_monotonic)
+        path = f"/challenges/credentials/{self._challenge_key}/qr-codes"
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(interval)
+                status, data = await self._api("GET", path)
+                if status == 410:  # Gone: QR caducado
+                    break
+                if status == 400:
+                    if self._error_code(data) == "InvalidCredentials":
+                        break
+                    raise SmartThingsFindError(f"Login QR rechazado ({self._error_code(data)})")
+                if status == 409:  # Conflict: aún no listo
+                    continue
+                if status == 429:
+                    raise SmartThingsFindError("Demasiados intentos de login; espera unos minutos")
+                if status != 200 or not isinstance(data, dict):
+                    _LOGGER.debug("Polling QR: HTTP %s", status)
+                    continue
+                if data.get("loginId"):
+                    self._login_id = str(data["loginId"])
+                    return
+                pin = data.get("userPin")
+                if pin and want_pin and str(pin) != self.pin:
+                    self.pin = str(pin)
+                    return
+        except aiohttp.ClientError as err:
+            raise SmartThingsFindError(f"Error de red durante el login: {_net_error(err)}") from err
+        raise SmartThingsFindLoginTimeout("El código QR caducó antes de completarse el login")
+
+    async def wait_for_scan(
+        self, timeout: float = 600, poll_interval: float | None = None
+    ) -> str | None:
+        """Espera a que se escanee el QR.
+
+        Devuelve el PIN que el usuario debe confirmar en el móvil, o ``None``
+        si Samsung aprobó directamente el login sin PIN.
+        """
+        await self._poll(timeout, poll_interval, want_pin=True)
+        return None if self._login_id else self.pin
+
+    async def wait_for_approval(
+        self, timeout: float = 600, poll_interval: float | None = None
+    ) -> None:
+        """Espera a que el usuario apruebe el login en el móvil."""
+        if self._login_id is None:
+            await self._poll(timeout, poll_interval, want_pin=False)
+
+    async def finish(self) -> str:
+        """Completa el login y devuelve el JSESSIONID de SmartThings Find."""
+        if self._login_id is None or self._context_key is None:
+            raise SmartThingsFindError("El login todavía no se ha aprobado")
         s = self._session
         try:
-            async with s.get(URL_SIGNIN_XHR, timeout=_TIMEOUT) as res:
-                if res.status != 200:
-                    raise SmartThingsFindError(f"signInXhr devolvió HTTP {res.status}")
-                payload = await res.json(content_type=None)
-            csrf = (payload.get("_csrf") or {}).get("token")
-            if not csrf:
-                raise SmartThingsFindError("No se recibió token CSRF de Samsung Account")
+            status, data = await self._api(
+                "PATCH", f"/challenges/credentials/{self._challenge_key}/qr-codes"
+            )
+            if status >= 400:
+                raise SmartThingsFindError(f"No se pudo confirmar el QR (HTTP {status})")
+            status, data = await self._api(
+                "PATCH",
+                f"/contexts/auths/{self._context_key}",
+                {"challengeKey": self._challenge_key, "step": "CREDENTIAL"},
+            )
+            if status >= 400:
+                raise SmartThingsFindError(
+                    f"Samsung rechazó el login (HTTP {status}, {self._error_code(data)})"
+                )
+            status, data = await self._api("GET", f"/auths/{self._context_key}")
+            page = data.get("page") if isinstance(data, dict) else None
+            if page != "complete":
+                # Otros valores son pasos extra de Samsung (verificación en dos
+                # pasos, aceptar términos, cuenta bloqueada…) que hay que
+                # completar una vez en la web de SmartThings Find.
+                raise SmartThingsFindError(
+                    f"Samsung pide un paso adicional ('{page}'). Inicia sesión una vez en "
+                    "https://smartthingsfind.samsung.com/ desde el navegador y vuelve a intentarlo"
+                )
 
-            next_url: str | None = None
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                await asyncio.sleep(poll_interval)
-                async with s.post(
-                    URL_QR_POLL, json={}, headers={"X-Csrf-Token": csrf}, timeout=_TIMEOUT
-                ) as res:
-                    if res.status != 200:
-                        _LOGGER.debug("Polling QR: HTTP %s", res.status)
-                        continue
-                    js = await res.json(content_type=None)
-                rtn = js.get("rtnCd")
-                _LOGGER.debug("Polling QR: %s", rtn)
-                if rtn == "SUCCESS":
-                    next_url = js.get("nextURL")
-                    break
-                if rtn not in (None, "POLLING"):
-                    raise SmartThingsFindError(f"Login QR rechazado: {rtn}")
-            if not next_url:
-                raise SmartThingsFindLoginTimeout("El código QR no se escaneó a tiempo")
-
-            # signInComplete -> HTML con un redirect JS hacia STF login.do?code=...
-            account = URL(ACCOUNT_BASE)
-            complete_url = _require_origin(account.join(URL(next_url)), account)
-            async with s.get(complete_url, timeout=_TIMEOUT) as res:
-                text = await res.text()
-                if res.status != 200:
-                    raise SmartThingsFindError(f"signInComplete devolvió HTTP {res.status}")
-            match = _REDIRECT_RE.search(text)
-            if not match:
-                raise SmartThingsFindError("No se encontró la redirección final del login")
-            redirect = _require_origin(URL(html.unescape(match.group(1))), STF_URL)
-
+            # Samsung responde con una redirección a STF login.do?code=...
+            async with s.get(
+                f"{ACCOUNT_API}/auths/{self._context_key}/url",
+                params=self._oauth_params(),
+                headers=self._headers,
+                allow_redirects=False,
+                timeout=_TIMEOUT,
+            ) as res:
+                location = res.headers.get("Location")
+                status = res.status
+            if not location:
+                raise SmartThingsFindError(
+                    f"Samsung no devolvió la redirección final (HTTP {status})"
+                )
+            redirect = _require_origin(URL(ACCOUNT_BASE).join(URL(location)), STF_URL)
             async with s.get(redirect, timeout=_TIMEOUT) as res:
-                if res.status != 200:
+                if res.status >= 400:
                     raise SmartThingsFindError(f"login.do devolvió HTTP {res.status}")
         except aiohttp.ClientError as err:
             raise SmartThingsFindError(f"Error de red durante el login: {_net_error(err)}") from err
@@ -417,6 +581,12 @@ class QrLogin:
         if not cookie or not cookie.value:
             raise SmartThingsFindError("Samsung no devolvió la cookie JSESSIONID")
         return cookie.value
+
+    async def wait(self, timeout: float = 600, poll_interval: float | None = None) -> str:
+        """Atajo: espera escaneo y aprobación y devuelve el JSESSIONID."""
+        await self.wait_for_scan(timeout, poll_interval)
+        await self.wait_for_approval(timeout, poll_interval)
+        return await self.finish()
 
 
 # --------------------------------------------------------------------------
@@ -439,20 +609,31 @@ class SmartThingsFindClient:
         return cookie.value if cookie else None
 
     async def async_refresh_csrf(self) -> None:
-        """Valida la sesión y obtiene el token CSRF (cabecera ``_csrf``)."""
-        try:
-            async with self._session.get(URL_CHK_LOGIN, timeout=_TIMEOUT) as res:
-                csrf = res.headers.get("_csrf")
-                body = await res.text()
-                status = res.status
-        except aiohttp.ClientError as err:
-            raise SmartThingsFindError(f"Error de red en chkLogin: {_net_error(err)}") from err
-        if status in (401, 403) or (status == 200 and not csrf):
-            _LOGGER.debug("chkLogin sin sesión (HTTP %s, %d bytes)", status, len(body))
-            raise SmartThingsFindAuthError(f"Sesión no válida (HTTP {status})")
-        if status != 200:
-            raise SmartThingsFindError(f"chkLogin devolvió HTTP {status}")
-        self._csrf = csrf
+        """Valida la sesión y obtiene el token CSRF (cabecera ``_csrf``).
+
+        La web actual lo obtiene de ``/init.do``; ``/chkLogin.do`` (web
+        anterior) se usa como respaldo.
+        """
+        for url in (URL_INIT, URL_CHK_LOGIN):
+            try:
+                async with self._session.get(
+                    url, headers={"Accept": "application/json"}, timeout=_TIMEOUT
+                ) as res:
+                    csrf = res.headers.get("_csrf")
+                    body = await res.text()
+                    status = res.status
+            except aiohttp.ClientError as err:
+                raise SmartThingsFindError(
+                    f"Error de red en {URL(url).path}: {_net_error(err)}"
+                ) from err
+            if csrf and status == 200:
+                self._csrf = csrf
+                return
+            if status in (401, 403) or body.strip().lower() in ("logout", "fail"):
+                _LOGGER.debug("%s sin sesión (HTTP %s)", URL(url).path, status)
+                raise SmartThingsFindAuthError(f"Sesión no válida (HTTP {status})")
+            _LOGGER.debug("%s sin token CSRF (HTTP %s)", URL(url).path, status)
+        raise SmartThingsFindError("SmartThings Find no devolvió token CSRF")
 
     async def _post(self, url: str, *, json: Any = None, data: Any = None) -> Any:
         """POST con el token CSRF; reintenta una vez si el token ha caducado."""
